@@ -908,6 +908,19 @@ error:
   return FALSE;
 }
 
+static inline void
+codec_destroy_fn (DroidMediaCodec * codec)
+{
+  if (!codec)
+    return;
+
+  droid_media_codec_stop (codec);
+  droid_media_codec_drain (codec);
+  droid_media_codec_destroy (codec);
+  return;
+}
+
+
 static gboolean
 gst_droidvdec_stop (GstVideoDecoder * decoder)
 {
@@ -916,8 +929,7 @@ gst_droidvdec_stop (GstVideoDecoder * decoder)
   GST_DEBUG_OBJECT (dec, "stop");
 
   if (dec->codec) {
-    droid_media_codec_stop (dec->codec);
-    droid_media_codec_destroy (dec->codec);
+    codec_destroy_fn (dec->codec);
     dec->codec = NULL;
     dec->queue = NULL;
   }
@@ -1150,8 +1162,7 @@ gst_droidvdec_finish (GstVideoDecoder * decoder)
 
   /* We drained the codec. Better to recreate it. */
   if (dec->codec) {
-    droid_media_codec_stop (dec->codec);
-    droid_media_codec_destroy (dec->codec);
+    codec_destroy_fn (dec->codec);
     dec->codec = NULL;
     dec->queue = NULL;
   }
