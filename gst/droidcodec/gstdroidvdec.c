@@ -909,17 +909,16 @@ error:
 }
 
 static inline void
-codec_destroy_fn (DroidMediaCodec * codec)
+codec_destroy_helper (GstDroidVDec * dec)
 {
-  if (!codec)
-    return;
-
-  droid_media_codec_stop (codec);
-  droid_media_codec_drain (codec);
-  droid_media_codec_destroy (codec);
-  return;
+  if (dec->codec) {
+    droid_media_codec_stop (dec->codec);
+    droid_media_codec_drain (dec->codec);
+    droid_media_codec_destroy (dec->codec);
+    dec->codec = NULL;
+    dec->queue = NULL;
+  }
 }
-
 
 static gboolean
 gst_droidvdec_stop (GstVideoDecoder * decoder)
@@ -928,11 +927,7 @@ gst_droidvdec_stop (GstVideoDecoder * decoder)
 
   GST_DEBUG_OBJECT (dec, "stop");
 
-  if (dec->codec) {
-    codec_destroy_fn (dec->codec);
-    dec->codec = NULL;
-    dec->queue = NULL;
-  }
+  codec_destroy_helper (dec);
 
   if (dec->in_state) {
     gst_video_codec_state_unref (dec->in_state);
@@ -1157,15 +1152,11 @@ gst_droidvdec_finish (GstVideoDecoder * decoder)
   g_cond_wait (&dec->state_cond, &dec->state_lock);
   g_mutex_unlock (&dec->state_lock);
   GST_VIDEO_DECODER_STREAM_LOCK (decoder);
-  g_mutex_lock (&dec->state_lock);
   GST_LOG_OBJECT (dec, "acquired stream lock");
+  g_mutex_lock (&dec->state_lock);
 
   /* We drained the codec. Better to recreate it. */
-  if (dec->codec) {
-    codec_destroy_fn (dec->codec);
-    dec->codec = NULL;
-    dec->queue = NULL;
-  }
+  codec_destroy_helper (dec);
 
   dec->dirty = TRUE;
 
