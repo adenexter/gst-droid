@@ -1360,11 +1360,11 @@ gst_droidvdec_change_state (GstElement * element, GstStateChange transition)
       finish_res = gst_droidvdec_finish (decoder);
     }
 
+    GST_VIDEO_DECODER_STREAM_UNLOCK (decoder);
+
     if (finish_res != GST_FLOW_NOT_SUPPORTED) {
       gst_droidvdec_stop_loop (dec);
     }
-
-    GST_VIDEO_DECODER_STREAM_UNLOCK (decoder);
   }
 
   ret = GST_ELEMENT_CLASS (parent_class)->change_state (element, transition);
