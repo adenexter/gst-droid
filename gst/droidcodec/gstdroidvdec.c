@@ -45,6 +45,7 @@ G_DEFINE_TYPE (GstDroidVDec, gst_droidvdec, GST_TYPE_VIDEO_DECODER);
 GST_DEBUG_CATEGORY_EXTERN (gst_droid_vdec_debug);
 #define GST_CAT_DEFAULT gst_droid_vdec_debug
 
+
 typedef struct
 {
   int *hal_format;
@@ -913,7 +914,6 @@ codec_destroy_helper (GstDroidVDec * dec)
 {
   if (dec->codec) {
     droid_media_codec_stop (dec->codec);
-    droid_media_codec_drain (dec->codec);
     droid_media_codec_destroy (dec->codec);
     dec->codec = NULL;
     dec->queue = NULL;
@@ -1140,27 +1140,29 @@ gst_droidvdec_finish (GstVideoDecoder * decoder)
   if (dec->codec && dec->state == GST_DROID_VDEC_STATE_OK) {
     GST_INFO_OBJECT (dec, "draining");
     dec->state = GST_DROID_VDEC_STATE_WAITING_FOR_EOS;
+
+    /* release the lock to allow _frame_available () to do its job */
+    GST_LOG_OBJECT (dec, "releasing stream lock");
+    GST_VIDEO_DECODER_STREAM_UNLOCK (decoder);
+
+    if (dec->queueing) {
+      g_cond_wait (&dec->state_cond, &dec->state_lock);
+    }
+
     droid_media_codec_drain (dec->codec);
-  } else {
-    goto out;
+
+    g_cond_wait (&dec->state_cond, &dec->state_lock);
+    g_mutex_unlock (&dec->state_lock);
+    GST_VIDEO_DECODER_STREAM_LOCK (decoder);
+    GST_LOG_OBJECT (dec, "acquired stream lock");
+    g_mutex_lock (&dec->state_lock);
+
+    /* We drained the codec. Better to recreate it. */
+    codec_destroy_helper (dec);
+
+    dec->dirty = TRUE;
   }
 
-  /* release the lock to allow _frame_available () to do its job */
-  GST_LOG_OBJECT (dec, "releasing stream lock");
-  GST_VIDEO_DECODER_STREAM_UNLOCK (decoder);
-  /* Now we wait for the codec to signal EOS */
-  g_cond_wait (&dec->state_cond, &dec->state_lock);
-  g_mutex_unlock (&dec->state_lock);
-  GST_VIDEO_DECODER_STREAM_LOCK (decoder);
-  GST_LOG_OBJECT (dec, "acquired stream lock");
-  g_mutex_lock (&dec->state_lock);
-
-  /* We drained the codec. Better to recreate it. */
-  codec_destroy_helper (dec);
-
-  dec->dirty = TRUE;
-
-out:
   dec->state = GST_DROID_VDEC_STATE_OK;
 
   GST_DEBUG_OBJECT (dec, "finished");
@@ -1202,15 +1204,6 @@ gst_droidvdec_handle_frame (GstVideoDecoder * decoder,
     goto error;
   }
 
-  g_mutex_lock (&dec->state_lock);
-  if (dec->state == GST_DROID_VDEC_STATE_EOS) {
-    GST_WARNING_OBJECT (dec, "got frame in eos state");
-    g_mutex_unlock (&dec->state_lock);
-    ret = GST_FLOW_EOS;
-    goto error;
-  }
-  g_mutex_unlock (&dec->state_lock);
-
   /* We must create the codec before we process any data. _create_codec will call
    * construct_decoder_codec_data which will store the nal prefix length for H264.
    * This is a bad situation. TODO: fix it
@@ -1233,6 +1226,17 @@ gst_droidvdec_handle_frame (GstVideoDecoder * decoder,
 
     dec->dirty = FALSE;
   }
+
+  g_mutex_lock (&dec->state_lock);
+  if (dec->state == GST_DROID_VDEC_STATE_EOS) {
+    GST_WARNING_OBJECT (dec, "got frame in eos state");
+    g_mutex_unlock (&dec->state_lock);
+    ret = GST_FLOW_EOS;
+    goto error;
+  }
+  dec->queueing = TRUE;
+
+  g_mutex_unlock (&dec->state_lock);
 
   if (!gst_droid_codec_prepare_decoder_frame (dec->codec_type, frame,
           &data.data, &cb)) {
@@ -1271,35 +1275,37 @@ gst_droidvdec_handle_frame (GstVideoDecoder * decoder,
     GST_DEBUG_OBJECT (dec, "not handling frame in error state: %s",
         gst_flow_get_name (dec->downstream_flow_ret));
     ret = dec->downstream_flow_ret;
-    goto unref;
+  } else {
+    ret = GST_FLOW_OK;
   }
 
-  g_mutex_lock (&dec->state_lock);
-  if (dec->state == GST_DROID_VDEC_STATE_EOS) {
-    GST_WARNING_OBJECT (dec, "got frame in eos state");
-    g_mutex_unlock (&dec->state_lock);
-    ret = GST_FLOW_EOS;
-    goto unref;
-  }
-
-  g_mutex_unlock (&dec->state_lock);
-
-  ret = GST_FLOW_OK;
-
-  goto unref;
+  gst_video_codec_frame_unref (frame);
 
 out:
-  return ret;
+  if (dec->queueing) {
+    g_mutex_lock (&dec->state_lock);
 
-unref:
-  gst_video_codec_frame_unref (frame);
-  goto out;
+    if (dec->state == GST_DROID_VDEC_STATE_EOS) {
+      GST_WARNING_OBJECT (dec, "got frame in eos state");
+      if (ret == GST_FLOW_OK) {
+        ret = GST_FLOW_EOS;
+      }
+    }
+
+    dec->queueing = FALSE;
+
+    g_cond_signal (&dec->state_cond);
+
+    g_mutex_unlock (&dec->state_lock);
+  }
+
+  return ret;
 
 error:
   /* don't leak the frame */
   gst_video_decoder_release_frame (decoder, frame);
 
-  return ret;
+  goto out;
 }
 
 static gboolean
@@ -1379,6 +1385,7 @@ gst_droidvdec_init (GstDroidVDec * dec)
   dec->codec_data = NULL;
   dec->codec_reported_height = -1;
   dec->codec_reported_width = -1;
+  dec->queueing = FALSE;
 
   g_mutex_init (&dec->state_lock);
   g_cond_init (&dec->state_cond);

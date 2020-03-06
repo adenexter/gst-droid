@@ -77,6 +77,7 @@ struct _GstDroidVDec
   gboolean dirty;
   DroidMediaRect crop_rect;
   gboolean running;
+  gboolean queueing;
   gboolean use_hardware_buffers;
   GstVideoFormat format;
 
